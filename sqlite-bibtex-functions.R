@@ -23,7 +23,9 @@ GROUP_CONCAT(FileNotes.note) AS mendpdfnotes
 FROM Documents
 LEFT OUTER JOIN FileNotes on FileNotes.documentId = Documents.id
 LEFT OUTER JOIN DocumentNotes ON Documents.id = DocumentNotes.documentId
-GROUP BY Documents.id"
+WHERE deletionPending != 'true'
+GROUP BY Documents.id
+"
 
 getTimestamp <- function(dbdf) {
     as.character(format(round(as.POSIXct("1970-01-01",
@@ -34,6 +36,7 @@ getTimestamp <- function(dbdf) {
 
 minimalDBchecks <- function(con) {
     dd <- dbReadTable(con, "Documents")
+    dd <- dd[dd$deletionPending != 'true',]
     nE <- nrow(dd)
     if(length(unique(dd$id)) != nE)
         stop("Eh? multiple entries for same document?")
@@ -213,11 +216,13 @@ bibtexDBConsistencyCheck <- function(res, bib) {
 getFolderInfo <- function(con) {
     ## folder Id, name as a string, and the parentId
     folderNames <- dbReadTable(con, "Folders")[, c(1, 3, 4)]
+    dd <- dbReadTable(con, "Documents")
+    deleted.ids <- dd$id[dd$deletionPending == 'true']
     ## documentID and folderId
     folders <- foldersDBread(con)
     ## Single line for each folderId with all contained documentIDs
     folderDocuments <- by(folders, folders$folderId,
-                      function(x) {unique(x$documentId)})
+                      function(x) {setdiff(unique(x$documentId),deleted.ids)})
 
     ## order the folderNames info: each folder and its children
     ## immediately below
@@ -407,7 +412,7 @@ getFilesBib <- function(x) {
     for(cc in strs.remove)
         ff <- gsub(cc, "", ff, fixed = TRUE)
     
-    files <- strsplit(ff, ";")[[1]]
+    files <- strsplit(ff, "[^\\$];")[[1]]
     files <- vapply(files, function(x) gsub("^:", "/", x), "a")
     files <- vapply(files, function(x) strsplit(x, ":")[[1]][1], "a")
     return(list(files = files, filepos = fpos))
@@ -488,10 +493,34 @@ fixFilesSingleEntry <- function(bibentry,
             ## No longer gsub and replacing by escaped chars, as we now
             ## quote the path. But need to fix the \\& and \\_ that
             ## Mendeley inserted
-            oldpath <- gsub("\\&", "&", filesp$files[nfile], fixed = TRUE)
+            orig.path <- filesp$files[nfile]
+            oldpath <- gsub("\\&", "&", orig.path, fixed = TRUE)
             oldpath <- gsub("\\_", "_", oldpath, fixed = TRUE)
+            oldpath <- gsub("{&}", "&", oldpath, fixed = TRUE)
+            oldpath <- gsub("{_}", "_", oldpath, fixed = TRUE)
+            oldpath <- gsub("{\\%}", "%", oldpath, fixed = TRUE)
+            oldpath <- gsub("{\\c{c}}", "ç", oldpath, fixed = TRUE)
+            subs <- c("{\\{}"="{",
+                      "{\\ss}"="ß",
+                      "{\\`{e}}"="è",
+                      "{\\'{u}}"="ú",
+                      "{\\'{i}}"= "í",
+                      "{\\'{o}}"="ó",
+                      "{\\'{a}}"="á",
+                      "{\\'{e}}"="é",
+                      "{\\~{n}}"= "ñ",
+                      "{\\S}"="§",
+                      "{\\v{s}}"="š",
+                      '{\\"{u}}'="ü",
+                      '{\\"{a}}'="ä",
+                      '{\\"{o}}'= "ö",
+                      "{\\^{a}}"="â",
+                      "$\\lambda$"="λ",
+                      "$\\backslash$"=""
+                      )
+            for(n in names(subs))
+              oldpath <- gsub(n,subs[n], oldpath, fixed = TRUE)
             ## oldpath <- gsubTheCrap(filesp$files[nfile])
-            
             if( (nchar(f1) > maxlength) || grepl("[^a-zA-Z0-9.-]", f1) ) {
                 filesp$files[nfile] <- newFname(bibkey, f1,
                                                 tmpdir,
@@ -501,16 +530,21 @@ fixFilesSingleEntry <- function(bibentry,
                 ## screw things up. And I can't use system2 either, for
                 ## some reason I just don't follow but cannot pursue. This
                 ## whole spaces thing really sucks.
-                cmd <- system(paste("cp", shQuote(oldpath), 
-                       filesp$files[nfile]), intern = FALSE)
-                if(cmd) {
-                    cat("\n Copying file failed for ", oldpath)
-                    warning("\n Copying file failed for ", oldpath)
+                cmd <- system(paste("cp", shQuote(oldpath),
+                                    filesp$files[nfile]), intern = FALSE)
+                if(cmd){
+                  cmd <- system(paste("cp", shQuote(gsub("'","’",oldpath)),
+                                      filesp$files[nfile]), intern = FALSE)
                 }
-            } 
+                if(cmd) {
+                  cat("\n Copying file failed for ", oldpath)
+                  cat("\n orig path ", orig.path)
+                  stop("\n Copying file failed for ", oldpath)
+                }
+            }
         }
         ## if(newf) {
-        
+
         ## We ALWAYS do this, to avoid the meaningless
         ## "Attachment" name that is given to the attachments.
 
